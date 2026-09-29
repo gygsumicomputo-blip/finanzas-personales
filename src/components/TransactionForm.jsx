@@ -1,54 +1,95 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { db, auth } from "../firebase";
+import {
+  collection,
+  addDoc,
+  onSnapshot,
+  query,
+  orderBy,
+  where,
+  serverTimestamp,
+} from "firebase/firestore";
+import { signInAnonymously, onAuthStateChanged } from "firebase/auth";
 
-// --- Datos de ejemplo de categorías (luego esto puede venir de Firestore) ---
 const CATEGORIAS_GASTO = ["comida", "transporte", "servicios", "entretenimiento", "otros"];
 const CATEGORIAS_INGRESO = ["salario", "ventas", "otros"];
 
 export default function TransactionForm() {
-  // 1) ESTADO: cada "useState" es una variable que React "vigila".
-  //    Cuando cambia, React vuelve a dibujar el componente.
+  const [uid, setUid] = useState(null);
   const [transacciones, setTransacciones] = useState([]);
+  const [cargando, setCargando] = useState(true);
   const [tipo, setTipo] = useState("gasto");
   const [monto, setMonto] = useState("");
   const [categoria, setCategoria] = useState(CATEGORIAS_GASTO[0]);
   const [descripcion, setDescripcion] = useState("");
+  const hoy = new Date();
+const mesActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}`;
+  const [mesSeleccionado, setMesSeleccionado] = useState(mesActual);
 
   const categoriasDisponibles = tipo === "gasto" ? CATEGORIAS_GASTO : CATEGORIAS_INGRESO;
 
-  // 2) MANEJO DEL FORMULARIO
-  function handleSubmit(e) {
-    e.preventDefault(); // evita que la página se recargue (comportamiento por defecto de un <form>)
+  // --- AUTENTICACIÓN ANÓNIMA ---
+  // La primera vez que se abre la app en un dispositivo, Firebase le asigna
+  // un uid único. En visitas siguientes, reconoce el mismo uid automáticamente
+  // (queda guardado en el navegador), por eso no hace falta volver a "loguearse".
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setUid(user.uid);
+      } else {
+        signInAnonymously(auth); // si no hay sesión, crea una nueva automáticamente
+      }
+    });
+    return () => unsubscribeAuth();
+  }, []);
 
-    if (!monto || Number(monto) <= 0) return; // validación mínima
+  // --- LEER SOLO LAS TRANSACCIONES DE ESTE uid ---
+  useEffect(() => {
+    if (!uid) return; // espera a tener el uid antes de consultar Firestore
 
-    const nuevaTransaccion = {
-      id: crypto.randomUUID(), // en Firestore esto lo genera Firebase automáticamente
-      tipo,
-      monto: Number(monto),
-      categoria,
-      descripcion,
-      fecha: new Date().toISOString().slice(0, 10), // YYYY-MM-DD
-      mes: new Date().toISOString().slice(0, 7), // YYYY-MM (útil para filtrar por mes en Firestore)
-    };
+    const q = query(
+      collection(db, "transacciones"),
+      where("uid", "==", uid),
+      orderBy("fecha", "desc")
+    );
 
-    setTransacciones((prev) => [nuevaTransaccion, ...prev]);
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const datos = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      setTransacciones(datos);
+      setCargando(false);
+    });
 
-    // limpiar formulario
-    setMonto("");
-    setDescripcion("");
+    return () => unsubscribe();
+  }, [uid, mesSeleccionado]);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!monto || Number(monto) <= 0 || !uid) return;
+
+    const hoy = new Date().toISOString().slice(0, 10);
+
+    try {
+      await addDoc(collection(db, "transacciones"), {
+        uid, // <-- esto es lo que separa los datos de cada dispositivo
+        tipo,
+        monto: Number(monto),
+        categoria,
+        descripcion,
+        fecha: hoy,
+        mes: hoy.slice(0, 7),
+        creadoEn: serverTimestamp(),
+      });
+      setMonto("");
+      setDescripcion("");
+    } catch (error) {
+      console.error("Error al guardar la transacción:", error);
+      alert("No se pudo guardar. Revisa la consola para más detalles.");
+    }
   }
 
-  // 3) CÁLCULOS DERIVADOS: no se guardan en estado, se recalculan solos
-  //    "useMemo" evita recalcular en cada render si nada cambió (optimización)
   const resumen = useMemo(() => {
-    const ingresos = transacciones
-      .filter((t) => t.tipo === "ingreso")
-      .reduce((suma, t) => suma + t.monto, 0);
-
-    const gastos = transacciones
-      .filter((t) => t.tipo === "gasto")
-      .reduce((suma, t) => suma + t.monto, 0);
-
+    const ingresos = transacciones.filter((t) => t.tipo === "ingreso").reduce((s, t) => s + t.monto, 0);
+    const gastos = transacciones.filter((t) => t.tipo === "gasto").reduce((s, t) => s + t.monto, 0);
     return { ingresos, gastos, saldo: ingresos - gastos };
   }, [transacciones]);
 
@@ -56,20 +97,25 @@ export default function TransactionForm() {
     const grupos = {};
     transacciones
       .filter((t) => t.tipo === "gasto")
-      .forEach((t) => {
-        grupos[t.categoria] = (grupos[t.categoria] || 0) + t.monto;
-      });
-    return Object.entries(grupos).sort((a, b) => b[1] - a[1]); // de mayor a menor
+      .forEach((t) => { grupos[t.categoria] = (grupos[t.categoria] || 0) + t.monto; });
+    return Object.entries(grupos).sort((a, b) => b[1] - a[1]);
   }, [transacciones]);
 
-  const formatoCOP = (n) =>
-    n.toLocaleString("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 });
+  const formatoCOP = (n) => n.toLocaleString("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 });
+
+  if (cargando) {
+    return <p className="text-center p-6 text-slate-500">Cargando transacciones...</p>;
+  }
 
   return (
     <div className="max-w-md mx-auto p-6 space-y-6 font-sans">
       <h1 className="text-xl font-bold text-slate-800">Finanzas Personales</h1>
-
-      {/* --- RESUMEN --- */}
+      <input
+  type="month"
+  value={mesSeleccionado}
+  onChange={(e) => setMesSeleccionado(e.target.value)}
+  className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"
+  />
       <div className="grid grid-cols-3 gap-2 text-center">
         <div className="bg-green-50 rounded-lg p-3">
           <p className="text-xs text-green-700">Ingresos</p>
@@ -87,57 +133,35 @@ export default function TransactionForm() {
         </div>
       </div>
 
-      {/* --- FORMULARIO --- */}
       <form onSubmit={handleSubmit} className="space-y-3 bg-white border border-slate-200 rounded-lg p-4">
         <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => { setTipo("gasto"); setCategoria(CATEGORIAS_GASTO[0]); }}
-            className={`flex-1 py-1.5 rounded-md text-sm font-medium ${tipo === "gasto" ? "bg-red-600 text-white" : "bg-slate-100 text-slate-600"}`}
-          >
+          <button type="button" onClick={() => { setTipo("gasto"); setCategoria(CATEGORIAS_GASTO[0]); }}
+            className={`flex-1 py-1.5 rounded-md text-sm font-medium ${tipo === "gasto" ? "bg-red-600 text-white" : "bg-slate-100 text-slate-600"}`}>
             Gasto
           </button>
-          <button
-            type="button"
-            onClick={() => { setTipo("ingreso"); setCategoria(CATEGORIAS_INGRESO[0]); }}
-            className={`flex-1 py-1.5 rounded-md text-sm font-medium ${tipo === "ingreso" ? "bg-green-600 text-white" : "bg-slate-100 text-slate-600"}`}
-          >
+          <button type="button" onClick={() => { setTipo("ingreso"); setCategoria(CATEGORIAS_INGRESO[0]); }}
+            className={`flex-1 py-1.5 rounded-md text-sm font-medium ${tipo === "ingreso" ? "bg-green-600 text-white" : "bg-slate-100 text-slate-600"}`}>
             Ingreso
           </button>
         </div>
 
-        <input
-          type="number"
-          placeholder="Monto"
-          value={monto}
-          onChange={(e) => setMonto(e.target.value)}
-          className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"
-        />
+        <input type="number" placeholder="Monto" value={monto} onChange={(e) => setMonto(e.target.value)}
+          className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm" />
 
-        <select
-          value={categoria}
-          onChange={(e) => setCategoria(e.target.value)}
-          className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"
-        >
-          {categoriasDisponibles.map((c) => (
-            <option key={c} value={c}>{c}</option>
-          ))}
+        <select value={categoria} onChange={(e) => setCategoria(e.target.value)}
+          className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm">
+          {categoriasDisponibles.map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
 
-        <input
-          type="text"
-          placeholder="Descripción (ej. almuerzo con cliente)"
-          value={descripcion}
+        <input type="text" placeholder="Descripción (ej. almuerzo con cliente)" value={descripcion}
           onChange={(e) => setDescripcion(e.target.value)}
-          className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"
-        />
+          className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm" />
 
         <button type="submit" className="w-full bg-slate-800 text-white rounded-md py-2 text-sm font-medium">
           Agregar
         </button>
       </form>
 
-      {/* --- GASTOS POR CATEGORÍA --- */}
       {gastosPorCategoria.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-lg p-4">
           <p className="text-sm font-semibold text-slate-700 mb-2">Gastos por categoría</p>
@@ -152,7 +176,6 @@ export default function TransactionForm() {
         </div>
       )}
 
-      {/* --- LISTADO --- */}
       <div className="space-y-2">
         {transacciones.map((t) => (
           <div key={t.id} className="flex justify-between items-center bg-white border border-slate-200 rounded-md px-3 py-2 text-sm">
