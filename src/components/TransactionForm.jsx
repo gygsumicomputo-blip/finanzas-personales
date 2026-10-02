@@ -10,9 +10,11 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { signInAnonymously, onAuthStateChanged } from "firebase/auth";
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
 
 const CATEGORIAS_GASTO = ["comida", "transporte", "servicios", "entretenimiento", "otros"];
 const CATEGORIAS_INGRESO = ["salario", "ventas", "otros"];
+const COLORES = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6", "#a855f7"];
 
 export default function TransactionForm() {
   const [uid, setUid] = useState(null);
@@ -22,34 +24,33 @@ export default function TransactionForm() {
   const [monto, setMonto] = useState("");
   const [categoria, setCategoria] = useState(CATEGORIAS_GASTO[0]);
   const [descripcion, setDescripcion] = useState("");
-  const hoy = new Date();
-const mesActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}`;
+
+  const hoyInicial = new Date();
+  const mesActual = `${hoyInicial.getFullYear()}-${String(hoyInicial.getMonth() + 1).padStart(2, "0")}`;
   const [mesSeleccionado, setMesSeleccionado] = useState(mesActual);
 
   const categoriasDisponibles = tipo === "gasto" ? CATEGORIAS_GASTO : CATEGORIAS_INGRESO;
 
   // --- AUTENTICACIÓN ANÓNIMA ---
-  // La primera vez que se abre la app en un dispositivo, Firebase le asigna
-  // un uid único. En visitas siguientes, reconoce el mismo uid automáticamente
-  // (queda guardado en el navegador), por eso no hace falta volver a "loguearse".
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
       if (user) {
         setUid(user.uid);
       } else {
-        signInAnonymously(auth); // si no hay sesión, crea una nueva automáticamente
+        signInAnonymously(auth);
       }
     });
     return () => unsubscribeAuth();
   }, []);
 
-  // --- LEER SOLO LAS TRANSACCIONES DE ESTE uid ---
+  // --- LEER SOLO LAS TRANSACCIONES DE ESTE uid Y ESTE MES ---
   useEffect(() => {
-    if (!uid) return; // espera a tener el uid antes de consultar Firestore
+    if (!uid) return;
 
     const q = query(
       collection(db, "transacciones"),
       where("uid", "==", uid),
+      where("mes", "==", mesSeleccionado),
       orderBy("fecha", "desc")
     );
 
@@ -66,11 +67,12 @@ const mesActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2,
     e.preventDefault();
     if (!monto || Number(monto) <= 0 || !uid) return;
 
-    const hoy = new Date().toISOString().slice(0, 10);
+    const ahora = new Date();
+    const hoy = `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, "0")}-${String(ahora.getDate()).padStart(2, "0")}`;
 
     try {
       await addDoc(collection(db, "transacciones"), {
-        uid, // <-- esto es lo que separa los datos de cada dispositivo
+        uid,
         tipo,
         monto: Number(monto),
         categoria,
@@ -101,6 +103,11 @@ const mesActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2,
     return Object.entries(grupos).sort((a, b) => b[1] - a[1]);
   }, [transacciones]);
 
+  const datosGrafica = gastosPorCategoria.map(([categoria, total]) => ({
+    categoria,
+    total,
+  }));
+
   const formatoCOP = (n) => n.toLocaleString("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 });
 
   if (cargando) {
@@ -110,12 +117,14 @@ const mesActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2,
   return (
     <div className="max-w-md mx-auto p-6 space-y-6 font-sans">
       <h1 className="text-xl font-bold text-slate-800">Finanzas Personales</h1>
+
       <input
-  type="month"
-  value={mesSeleccionado}
-  onChange={(e) => setMesSeleccionado(e.target.value)}
-  className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"
-  />
+        type="month"
+        value={mesSeleccionado}
+        onChange={(e) => setMesSeleccionado(e.target.value)}
+        className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"
+      />
+
       <div className="grid grid-cols-3 gap-2 text-center">
         <div className="bg-green-50 rounded-lg p-3">
           <p className="text-xs text-green-700">Ingresos</p>
@@ -173,6 +182,29 @@ const mesActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2,
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {datosGrafica.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-lg p-4" style={{ height: 250 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={datosGrafica}
+                dataKey="total"
+                nameKey="categoria"
+                cx="50%"
+                cy="50%"
+                outerRadius={80}
+                label={(entry) => entry.categoria}
+              >
+                {datosGrafica.map((_, index) => (
+                  <Cell key={index} fill={COLORES[index % COLORES.length]} />
+                ))}
+              </Pie>
+              <Tooltip formatter={(value) => formatoCOP(value)} />
+            </PieChart>
+          </ResponsiveContainer>
         </div>
       )}
 
