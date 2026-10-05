@@ -3,6 +3,9 @@ import { db, auth } from "../firebase";
 import {
   collection,
   addDoc,
+  deleteDoc,
+  updateDoc,
+  doc,
   onSnapshot,
   query,
   orderBy,
@@ -25,13 +28,16 @@ export default function TransactionForm() {
   const [categoria, setCategoria] = useState(CATEGORIAS_GASTO[0]);
   const [descripcion, setDescripcion] = useState("");
 
+  // --- NUEVO: estado para controlar qué transacción se está editando ---
+  const [editandoId, setEditandoId] = useState(null);
+  const [edicion, setEdicion] = useState({ monto: "", descripcion: "", fecha: "" });
+
   const hoyInicial = new Date();
   const mesActual = `${hoyInicial.getFullYear()}-${String(hoyInicial.getMonth() + 1).padStart(2, "0")}`;
   const [mesSeleccionado, setMesSeleccionado] = useState(mesActual);
 
   const categoriasDisponibles = tipo === "gasto" ? CATEGORIAS_GASTO : CATEGORIAS_INGRESO;
 
-  // --- AUTENTICACIÓN ANÓNIMA ---
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
       if (user) {
@@ -43,7 +49,6 @@ export default function TransactionForm() {
     return () => unsubscribeAuth();
   }, []);
 
-  // --- LEER SOLO LAS TRANSACCIONES DE ESTE uid Y ESTE MES ---
   useEffect(() => {
     if (!uid) return;
 
@@ -55,7 +60,7 @@ export default function TransactionForm() {
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const datos = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      const datos = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
       setTransacciones(datos);
       setCargando(false);
     });
@@ -86,6 +91,48 @@ export default function TransactionForm() {
     } catch (error) {
       console.error("Error al guardar la transacción:", error);
       alert("No se pudo guardar. Revisa la consola para más detalles.");
+    }
+  }
+
+  // --- NUEVO: borrar una transacción ---
+  async function eliminarTransaccion(id) {
+    const confirmar = window.confirm("¿Seguro que quieres eliminar esta transacción?");
+    if (!confirmar) return;
+
+    try {
+      await deleteDoc(doc(db, "transacciones", id));
+    } catch (error) {
+      console.error("Error al eliminar:", error);
+      alert("No se pudo eliminar. Revisa la consola.");
+    }
+  }
+
+  // --- NUEVO: empezar a editar una transacción ---
+  function iniciarEdicion(t) {
+    setEditandoId(t.id);
+    setEdicion({ monto: t.monto, descripcion: t.descripcion, fecha: t.fecha });
+  }
+
+  // --- NUEVO: cancelar edición sin guardar ---
+  function cancelarEdicion() {
+    setEditandoId(null);
+  }
+
+  // --- NUEVO: guardar los cambios de la edición ---
+  async function guardarEdicion(id) {
+    if (!edicion.monto || Number(edicion.monto) <= 0) return;
+
+    try {
+      await updateDoc(doc(db, "transacciones", id), {
+        monto: Number(edicion.monto),
+        descripcion: edicion.descripcion,
+        fecha: edicion.fecha,
+        mes: edicion.fecha.slice(0, 7), // si cambia la fecha, el mes también debe actualizarse
+      });
+      setEditandoId(null);
+    } catch (error) {
+      console.error("Error al guardar la edición:", error);
+      alert("No se pudo guardar el cambio. Revisa la consola.");
     }
   }
 
@@ -210,14 +257,61 @@ export default function TransactionForm() {
 
       <div className="space-y-2">
         {transacciones.map((t) => (
-          <div key={t.id} className="flex justify-between items-center bg-white border border-slate-200 rounded-md px-3 py-2 text-sm">
-            <div>
-              <p className="text-slate-700">{t.descripcion || t.categoria}</p>
-              <p className="text-xs text-slate-400 capitalize">{t.categoria} · {t.fecha}</p>
-            </div>
-            <span className={t.tipo === "ingreso" ? "text-green-700 font-medium" : "text-red-700 font-medium"}>
-              {t.tipo === "ingreso" ? "+" : "-"}{formatoCOP(t.monto)}
-            </span>
+          <div key={t.id} className="bg-white border border-slate-200 rounded-md px-3 py-2 text-sm">
+            {editandoId === t.id ? (
+              // --- NUEVO: modo edición para esta fila ---
+              <div className="space-y-2">
+                <input
+                  type="number"
+                  value={edicion.monto}
+                  onChange={(e) => setEdicion({ ...edicion, monto: e.target.value })}
+                  className="w-full border border-slate-300 rounded-md px-2 py-1 text-sm"
+                  placeholder="Monto"
+                />
+                <input
+                  type="text"
+                  value={edicion.descripcion}
+                  onChange={(e) => setEdicion({ ...edicion, descripcion: e.target.value })}
+                  className="w-full border border-slate-300 rounded-md px-2 py-1 text-sm"
+                  placeholder="Descripción"
+                />
+                <input
+                  type="date"
+                  value={edicion.fecha}
+                  onChange={(e) => setEdicion({ ...edicion, fecha: e.target.value })}
+                  className="w-full border border-slate-300 rounded-md px-2 py-1 text-sm"
+                />
+                <div className="flex gap-2">
+                  <button onClick={() => guardarEdicion(t.id)}
+                    className="flex-1 bg-green-600 text-white rounded-md py-1 text-xs font-medium">
+                    Guardar
+                  </button>
+                  <button onClick={cancelarEdicion}
+                    className="flex-1 bg-slate-200 text-slate-700 rounded-md py-1 text-xs font-medium">
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            ) : (
+              // --- vista normal ---
+              <div className="flex justify-between items-center">
+                <div>
+                  <p className="text-slate-700">{t.descripcion || t.categoria}</p>
+                  <p className="text-xs text-slate-400 capitalize">{t.categoria} · {t.fecha}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={t.tipo === "ingreso" ? "text-green-700 font-medium" : "text-red-700 font-medium"}>
+                    {t.tipo === "ingreso" ? "+" : "-"}{formatoCOP(t.monto)}
+                  </span>
+                  <button onClick={() => iniciarEdicion(t)} className="text-slate-400 hover:text-slate-700 text-xs">
+                    ✏️
+                  </button>
+                  <button onClick={() => eliminarTransaccion(t.id)} className="text-slate-400 hover:text-red-600 text-xs">
+                    🗑️
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         ))}
       </div>
